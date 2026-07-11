@@ -17,7 +17,7 @@ staticClients:
     name: Tool Local
     public: true
     redirectURIs:
-      - http://localhost:8080/auth/callback
+      - http://localhost:8080/oidcauth/callback
     allowedConnectors:
       - github
     ssoSharedWith:
@@ -28,30 +28,32 @@ staticClients:
 
 ```go
 auth, err := dexgithub.New(ctx, dexgithub.Config{
-	Issuer:        "https://auth.example.com",
-	ClientID:      "tool-local",
-	CallbackURL:   "http://localhost:8080/auth/callback",
-	PublicURL:     "http://localhost:5173",
-	AfterLoginURL: "http://localhost:5173/#/console",
-	AllowedUsers:  []string{"octocat"},
-	SessionTTL:    24 * time.Hour,
+	Issuer:       "https://auth.example.com",
+	ClientID:     "tool-local",
+	ExternalURL:  "http://localhost:5173",
+	AllowedUsers: []string{"octocat"},
+	SessionTTL:   24 * time.Hour,
 }, dexgithub.Options{})
 if err != nil {
 	return err
 }
 
-mux.Handle("/auth/", auth.Handler())
+mux.Handle("/oidcauth/", auth.Handler())
 mux.Handle("/api/", auth.RequireUser(api))
 ```
 
 端点：
 
 ```text
-GET  /auth/login
-GET  /auth/callback
-GET  /auth/session
-POST /auth/logout
+GET  /oidcauth/login
+GET  /oidcauth/callback
+GET  /oidcauth/session
+POST /oidcauth/logout
 ```
+
+`ExternalURL` 是部署时可信的浏览器 origin。callback 固定派生为
+`<external-url>/oidcauth/callback`，Dex client 必须注册该地址。登录入口可以携带经过严格校验的
+同源路径，例如 `/oidcauth/login?return_to=%2F%23%2Fsettings`；登录成功后恢复该位置，缺省回到 `/`。
 
 `RequireUser` 验证成功后将身份写入 request context：
 
@@ -81,8 +83,8 @@ Dex GitHub 身份形状：
 - Authorization Code Flow 始终使用 S256 PKCE；
 - public client 不发送 secret；配置 `ClientSecret` 时使用 confidential client；
 - 身份 Cookie 使用 `HttpOnly`、`SameSite=Strict`，HTTPS 时使用 `Secure` 与 `__Host-` 前缀；
-- 修改类请求要求 `Origin` 与 `PublicURL` 精确同源；
-- `AfterLoginURL` 必须与 `PublicURL` 同源；
+- 修改类请求要求 `Origin` 与 `ExternalURL` 精确同源；
+- `return_to` 只接受同源绝对路径，并绑定到一次性登录 flow；
 - 不保存 access token 或 refresh token；
 - 每次请求重新执行授权器，修改白名单后现有 Cookie 立即受新策略约束。
 

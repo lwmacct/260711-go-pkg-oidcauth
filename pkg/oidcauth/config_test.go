@@ -8,18 +8,16 @@ import (
 
 func TestConfigValidate(t *testing.T) {
 	valid := Config{
-		Issuer:        "https://auth.example.com/",
-		ClientID:      "tool",
-		CallbackURL:   "https://tool.example.com/auth/callback",
-		PublicURL:     "https://tool.example.com/",
-		AfterLoginURL: "https://tool.example.com/#/console",
-		SessionTTL:    time.Hour,
+		Issuer:      "https://auth.example.com/",
+		ClientID:    "tool",
+		ExternalURL: "https://tool.example.com/",
+		SessionTTL:  time.Hour,
 	}
 	validated, err := valid.Validate()
 	if err != nil {
 		t.Fatalf("validate config: %v", err)
 	}
-	if validated.Issuer != "https://auth.example.com" || validated.PublicURL != "https://tool.example.com" {
+	if validated.Issuer != "https://auth.example.com" || validated.ExternalURL != "https://tool.example.com" {
 		t.Fatalf("config was not normalized: %#v", validated)
 	}
 
@@ -28,9 +26,8 @@ func TestConfigValidate(t *testing.T) {
 		mutate func(*Config)
 	}{
 		{name: "http issuer", mutate: func(c *Config) { c.Issuer = "http://auth.example.com" }},
-		{name: "remote http callback", mutate: func(c *Config) { c.CallbackURL = "http://tool.example.com/auth/callback" }},
-		{name: "different callback host", mutate: func(c *Config) { c.CallbackURL = "https://other.example.com/auth/callback" }},
-		{name: "cross-origin redirect", mutate: func(c *Config) { c.AfterLoginURL = "https://evil.example.com/" }},
+		{name: "remote http external URL", mutate: func(c *Config) { c.ExternalURL = "http://tool.example.com" }},
+		{name: "external URL path", mutate: func(c *Config) { c.ExternalURL = "https://tool.example.com/app" }},
 		{name: "zero ttl", mutate: func(c *Config) { c.SessionTTL = 0 }},
 	}
 	for _, test := range tests {
@@ -48,8 +45,7 @@ func TestConfigAllowsLoopbackHTTPWithDifferentPorts(t *testing.T) {
 	_, err := (Config{
 		Issuer:      "https://auth.example.com",
 		ClientID:    "tool-local",
-		CallbackURL: "http://localhost:8080/auth/callback",
-		PublicURL:   "http://localhost:5173",
+		ExternalURL: "http://localhost:5173",
 		SessionTTL:  time.Hour,
 	}).Validate()
 	if err != nil {

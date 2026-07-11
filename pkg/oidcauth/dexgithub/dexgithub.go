@@ -13,14 +13,12 @@ import (
 )
 
 type Config struct {
-	Issuer        string        `json:"issuer"          desc:"Dex issuer URL"`
-	ClientID      string        `json:"client-id"       desc:"Dex OIDC client ID"`
-	ClientSecret  string        `json:"client-secret"   desc:"Dex confidential client secret；public client 留空"`
-	CallbackURL   string        `json:"callback-url"    desc:"OIDC callback URL"`
-	PublicURL     string        `json:"public-url"      desc:"浏览器访问应用的公开 URL"`
-	AfterLoginURL string        `json:"after-login-url" desc:"登录成功后的同源跳转 URL"`
-	AllowedUsers  []string      `json:"allowed-users"   desc:"允许访问应用的 GitHub 用户名"`
-	SessionTTL    time.Duration `json:"session-ttl"     desc:"身份 Cookie 最长有效时间"`
+	Issuer       string        `json:"issuer"        desc:"Dex issuer URL"`
+	ClientID     string        `json:"client-id"      desc:"Dex OIDC client ID"`
+	ClientSecret string        `json:"client-secret"  desc:"Dex confidential client secret；public client 留空"`
+	ExternalURL  string        `json:"external-url"   desc:"浏览器访问应用的外部 origin"`
+	AllowedUsers []string      `json:"allowed-users"  desc:"允许访问应用的 GitHub 用户名"`
+	SessionTTL   time.Duration `json:"session-ttl"     desc:"身份 Cookie 最长有效时间"`
 }
 
 type Options struct {
@@ -39,9 +37,7 @@ func (c Config) Validate() (Config, error) {
 	c.Issuer = core.Issuer
 	c.ClientID = core.ClientID
 	c.ClientSecret = core.ClientSecret
-	c.CallbackURL = core.CallbackURL
-	c.PublicURL = core.PublicURL
-	c.AfterLoginURL = core.AfterLoginURL
+	c.ExternalURL = core.ExternalURL
 	c.SessionTTL = core.SessionTTL
 	for i := range c.AllowedUsers {
 		c.AllowedUsers[i] = strings.ToLower(strings.TrimSpace(c.AllowedUsers[i]))
@@ -65,13 +61,11 @@ func New(ctx context.Context, config Config, options Options) (*oidcauth.Auth, e
 
 func (c Config) core() oidcauth.Config {
 	return oidcauth.Config{
-		Issuer:        c.Issuer,
-		ClientID:      c.ClientID,
-		ClientSecret:  c.ClientSecret,
-		CallbackURL:   c.CallbackURL,
-		PublicURL:     c.PublicURL,
-		AfterLoginURL: c.AfterLoginURL,
-		SessionTTL:    c.SessionTTL,
+		Issuer:       c.Issuer,
+		ClientID:     c.ClientID,
+		ClientSecret: c.ClientSecret,
+		ExternalURL:  c.ExternalURL,
+		SessionTTL:   c.SessionTTL,
 	}
 }
 

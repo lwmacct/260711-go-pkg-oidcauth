@@ -47,10 +47,7 @@ func New(ctx context.Context, config Config, options Options) (*Auth, error) {
 	if pathPrefix == "" || !strings.HasPrefix(pathPrefix, "/") || strings.Contains(pathPrefix, "?") || strings.Contains(pathPrefix, "#") {
 		return nil, fmt.Errorf("%w: path prefix", ErrInvalidConfig)
 	}
-	callbackURL, _ := url.Parse(config.CallbackURL)
-	if callbackURL.Path != pathPrefix+"/callback" {
-		return nil, fmt.Errorf("%w: callback path must be %s/callback", ErrInvalidConfig, pathPrefix)
-	}
+	callbackURL, _ := url.Parse(config.callbackURL(pathPrefix))
 	providerCtx := oidc.ClientContext(ctx, options.HTTPClient)
 	provider, err := oidc.NewProvider(providerCtx, config.Issuer)
 	if err != nil {
@@ -63,7 +60,7 @@ func New(ctx context.Context, config Config, options Options) (*Auth, error) {
 		endpoint.AuthStyle = oauth2.AuthStyleInHeader
 	}
 	callback := callbackURL
-	publicURL, _ := url.Parse(config.PublicURL)
+	publicURL, _ := url.Parse(config.ExternalURL)
 	cookieSuffix := shortHash(config.ClientID)
 	cookieName := options.CookieName
 	flowCookie := options.FlowCookieName
@@ -90,7 +87,7 @@ func New(ctx context.Context, config Config, options Options) (*Auth, error) {
 			ClientID:     config.ClientID,
 			ClientSecret: config.ClientSecret,
 			Endpoint:     endpoint,
-			RedirectURL:  config.CallbackURL,
+			RedirectURL:  callbackURL.String(),
 			Scopes:       scopes,
 		},
 		verifier:   provider.Verifier(&oidc.Config{ClientID: config.ClientID}),
@@ -146,6 +143,11 @@ func (a *Auth) Identity(r *http.Request) (Identity, error) {
 }
 
 func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
+	returnTo, err := normalizeReturnTo(r.URL.Query().Get("return_to"))
+	if err != nil {
+		http.Error(w, "invalid return_to", http.StatusBadRequest)
+		return
+	}
 	state, err := randomToken(a.options.Random)
 	if err != nil {
 		http.Error(w, "login unavailable", http.StatusInternalServerError)
@@ -161,7 +163,7 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "login unavailable", http.StatusInternalServerError)
 		return
 	}
-	flow := LoginFlow{State: state, Nonce: nonce, Verifier: verifier, ExpiresAt: a.options.Now().Add(a.options.FlowTTL)}
+	flow := LoginFlow{State: state, Nonce: nonce, Verifier: verifier, ReturnTo: returnTo, ExpiresAt: a.options.Now().Add(a.options.FlowTTL)}
 	if err := a.options.FlowStore.Create(r.Context(), flow); err != nil {
 		http.Error(w, "login unavailable", http.StatusInternalServerError)
 		return
@@ -214,7 +216,20 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.setIdentityCookie(w, rawIDToken, maxAge)
-	http.Redirect(w, r, a.config.AfterLoginURL, http.StatusFound)
+	http.Redirect(w, r, flow.ReturnTo, http.StatusFound)
+}
+
+func normalizeReturnTo(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "/", nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.Opaque != "" ||
+		!strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") || strings.Contains(value, "\\") {
+		return "", errors.New("return_to must be a same-origin absolute path")
+	}
+	return parsed.String(), nil
 }
 
 func (a *Auth) session(w http.ResponseWriter, r *http.Request) {

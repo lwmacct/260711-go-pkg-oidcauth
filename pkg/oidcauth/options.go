@@ -31,7 +31,7 @@ func defaultOptions(options Options) Options {
 		options.HTTPClient = http.DefaultClient
 	}
 	if options.PathPrefix == "" {
-		options.PathPrefix = "/auth"
+		options.PathPrefix = "/oidcauth"
 	}
 	if options.FlowTTL <= 0 {
 		options.FlowTTL = 5 * time.Minute

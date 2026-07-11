@@ -24,7 +24,7 @@ func TestOIDCLoginSessionMiddlewareAndLogout(t *testing.T) {
 	auth := newTestAuth(t, provider, now)
 
 	login := httptest.NewRecorder()
-	auth.Handler().ServeHTTP(login, httptest.NewRequest(http.MethodGet, "https://tool.example.com/auth/login", nil))
+	auth.Handler().ServeHTTP(login, httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/login?return_to=%2F%23%2Fconsole", nil))
 	if login.Code != http.StatusFound {
 		t.Fatalf("unexpected login status: %d", login.Code)
 	}
@@ -40,11 +40,11 @@ func TestOIDCLoginSessionMiddlewareAndLogout(t *testing.T) {
 	provider.expectedVerifier = authFlowVerifier(t, auth, query.Get("state"))
 	flowCookie := login.Result().Cookies()[0]
 
-	callbackRequest := httptest.NewRequest(http.MethodGet, "https://tool.example.com/auth/callback?code=code&state="+url.QueryEscape(query.Get("state")), nil)
+	callbackRequest := httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/callback?code=code&state="+url.QueryEscape(query.Get("state")), nil)
 	callbackRequest.AddCookie(flowCookie)
 	callback := httptest.NewRecorder()
 	auth.Handler().ServeHTTP(callback, callbackRequest)
-	if callback.Code != http.StatusFound || callback.Header().Get("Location") != "https://tool.example.com/#/console" {
+	if callback.Code != http.StatusFound || callback.Header().Get("Location") != "/#/console" {
 		t.Fatalf("unexpected callback: status=%d location=%q body=%q", callback.Code, callback.Header().Get("Location"), callback.Body.String())
 	}
 	identityCookie := findCookie(t, callback.Result().Cookies(), auth.cookieName)
@@ -52,7 +52,7 @@ func TestOIDCLoginSessionMiddlewareAndLogout(t *testing.T) {
 		t.Fatalf("unexpected identity cookie: %#v", identityCookie)
 	}
 
-	sessionRequest := httptest.NewRequest(http.MethodGet, "https://tool.example.com/auth/session", nil)
+	sessionRequest := httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/session", nil)
 	sessionRequest.AddCookie(identityCookie)
 	session := httptest.NewRecorder()
 	auth.Handler().ServeHTTP(session, sessionRequest)
@@ -83,7 +83,7 @@ func TestOIDCLoginSessionMiddlewareAndLogout(t *testing.T) {
 		t.Fatalf("unexpected CSRF status: %d", csrfResponse.Code)
 	}
 
-	logoutRequest := httptest.NewRequest(http.MethodPost, "https://tool.example.com/auth/logout", nil)
+	logoutRequest := httptest.NewRequest(http.MethodPost, "https://tool.example.com/oidcauth/logout", nil)
 	logoutRequest.Header.Set("Origin", "https://tool.example.com")
 	logoutRequest.AddCookie(identityCookie)
 	logout := httptest.NewRecorder()
@@ -96,6 +96,40 @@ func TestOIDCLoginSessionMiddlewareAndLogout(t *testing.T) {
 	auth.Handler().ServeHTTP(replay, callbackRequest)
 	if replay.Code != http.StatusBadRequest {
 		t.Fatalf("replayed callback must fail, got %d", replay.Code)
+	}
+}
+
+func TestLoginRejectsUnsafeReturnTo(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	provider := newTestProvider(t, now)
+	auth := newTestAuth(t, provider, now)
+
+	for _, value := range []string{"https://evil.example.com/", "//evil.example.com/", `/\\evil`} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/login?return_to="+url.QueryEscape(value), nil)
+		auth.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("return_to %q: unexpected status %d", value, recorder.Code)
+		}
+	}
+}
+
+func TestLoginDefaultsReturnToRoot(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	provider := newTestProvider(t, now)
+	auth := newTestAuth(t, provider, now)
+	recorder := httptest.NewRecorder()
+	auth.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/login", nil))
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := auth.options.FlowStore.(*MemoryFlowStore)
+	store.mu.Lock()
+	flow := store.flows[location.Query().Get("state")]
+	store.mu.Unlock()
+	if flow.ReturnTo != "/" {
+		t.Fatalf("unexpected return_to: %q", flow.ReturnTo)
 	}
 }
 
@@ -147,12 +181,10 @@ func (p *testProvider) serveHTTP(w http.ResponseWriter, r *http.Request) {
 func newTestAuth(t *testing.T, provider *testProvider, now time.Time) *Auth {
 	t.Helper()
 	auth, err := New(t.Context(), Config{
-		Issuer:        provider.server.URL,
-		ClientID:      "tool",
-		CallbackURL:   "https://tool.example.com/auth/callback",
-		PublicURL:     "https://tool.example.com",
-		AfterLoginURL: "https://tool.example.com/#/console",
-		SessionTTL:    30 * time.Minute,
+		Issuer:      provider.server.URL,
+		ClientID:    "tool",
+		ExternalURL: "https://tool.example.com",
+		SessionTTL:  30 * time.Minute,
 	}, Options{
 		HTTPClient: provider.server.Client(),
 		Now:        func() time.Time { return now },

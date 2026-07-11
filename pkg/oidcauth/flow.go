@@ -10,6 +10,7 @@ type LoginFlow struct {
 	State     string
 	Nonce     string
 	Verifier  string
+	ReturnTo  string
 	ExpiresAt time.Time
 }
 
