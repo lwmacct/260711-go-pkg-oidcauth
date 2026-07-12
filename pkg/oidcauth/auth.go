@@ -109,15 +109,23 @@ func (a *Auth) Handler() http.Handler {
 	return mux
 }
 
-func (a *Auth) RequireUser(next http.Handler) http.Handler {
+func (a *Auth) RequireAuthenticated(next http.Handler) http.Handler {
+	return a.requireIdentity(next, false)
+}
+
+func (a *Auth) RequireAccess(next http.Handler) http.Handler {
+	return a.requireIdentity(next, true)
+}
+
+func (a *Auth) requireIdentity(next http.Handler, authorize bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		identity, err := a.Identity(r)
+		identity, err := a.Authenticate(r)
 		if err != nil {
-			status := http.StatusUnauthorized
-			if errors.Is(err, ErrForbidden) {
-				status = http.StatusForbidden
-			}
-			writeJSONError(w, status, errorMessage(status))
+			writeJSONError(w, http.StatusUnauthorized, errorMessage(http.StatusUnauthorized))
+			return
+		}
+		if authorize && a.Authorize(r.Context(), identity) != nil {
+			writeJSONError(w, http.StatusForbidden, errorMessage(http.StatusForbidden))
 			return
 		}
 		if isUnsafeMethod(r.Method) && !a.sameOrigin(r) {
@@ -129,7 +137,7 @@ func (a *Auth) RequireUser(next http.Handler) http.Handler {
 	})
 }
 
-func (a *Auth) Identity(r *http.Request) (Identity, error) {
+func (a *Auth) Authenticate(r *http.Request) (Identity, error) {
 	cookie, err := r.Cookie(a.cookieName)
 	if err != nil {
 		return Identity{}, ErrUnauthenticated
@@ -138,10 +146,14 @@ func (a *Auth) Identity(r *http.Request) (Identity, error) {
 	if err != nil || a.cookieMaxAge(time.Unix(claims.IssuedAt, 0), idToken.Expiry) <= 0 {
 		return Identity{}, ErrUnauthenticated
 	}
-	if err := a.options.Authorizer.Authorize(r.Context(), identity); err != nil {
-		return Identity{}, fmt.Errorf("%w: %v", ErrForbidden, err)
-	}
 	return identity, nil
+}
+
+func (a *Auth) Authorize(ctx context.Context, identity Identity) error {
+	if err := a.options.Authorizer.Authorize(ctx, identity); err != nil {
+		return fmt.Errorf("%w: %v", ErrForbidden, err)
+	}
+	return nil
 }
 
 func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
@@ -213,15 +225,10 @@ func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "identity token missing or too large", http.StatusBadGateway)
 		return
 	}
-	idToken, identity, claims, err := a.verify(r.Context(), rawIDToken)
+	idToken, _, claims, err := a.verify(r.Context(), rawIDToken)
 	if err != nil || idToken.Nonce != flow.Nonce {
 		a.options.Logger.Warn("OIDC identity validation failed", "error", err)
 		http.Error(w, "invalid identity", http.StatusUnauthorized)
-		return
-	}
-	if err := a.options.Authorizer.Authorize(r.Context(), identity); err != nil {
-		a.options.Logger.Warn("OIDC user is not authorized", "subject", identity.Subject, "username", identity.Username, "provider", identity.Provider, "provider_user_id", identity.ProviderUserID)
-		http.Error(w, "user is not authorized", http.StatusForbidden)
 		return
 	}
 	maxAge := a.cookieMaxAge(time.Unix(claims.IssuedAt, 0), idToken.Expiry)
@@ -247,12 +254,12 @@ func normalizeReturnTo(value string) (string, error) {
 }
 
 func (a *Auth) session(w http.ResponseWriter, r *http.Request) {
-	identity, err := a.Identity(r)
-	response := SessionResponse{Status: SessionStatusAuthenticated, Identity: &identity}
-	if err != nil {
-		response = SessionResponse{Status: SessionStatusSignedOut}
-		if errors.Is(err, ErrForbidden) {
-			response.Status = SessionStatusForbidden
+	identity, err := a.Authenticate(r)
+	response := SessionResponse{Status: SessionStatusSignedOut}
+	if err == nil {
+		response = SessionResponse{Status: SessionStatusAuthenticated, Access: AccessStatusGranted, Identity: &identity}
+		if a.Authorize(r.Context(), identity) != nil {
+			response.Access = AccessStatusDenied
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

@@ -43,6 +43,7 @@ func TestOIDCLoginSessionMiddlewareAndLogout(t *testing.T) {
 
 	callbackRequest := httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/callback?code=code&state="+url.QueryEscape(query.Get("state")), nil)
 	callbackRequest.AddCookie(flowCookie)
+	auth.options.Authorizer = AuthorizerFunc(func(context.Context, Identity) error { return ErrForbidden })
 	callback := httptest.NewRecorder()
 	auth.Handler().ServeHTTP(callback, callbackRequest)
 	if callback.Code != http.StatusFound || callback.Header().Get("Location") != "/#/console" {
@@ -53,6 +54,13 @@ func TestOIDCLoginSessionMiddlewareAndLogout(t *testing.T) {
 		t.Fatalf("unexpected identity cookie: %#v", identityCookie)
 	}
 
+	deniedSessionRequest := httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/session", nil)
+	deniedSessionRequest.AddCookie(identityCookie)
+	deniedSession := httptest.NewRecorder()
+	auth.Handler().ServeHTTP(deniedSession, deniedSessionRequest)
+	assertAuthenticatedSession(t, deniedSession, AccessStatusDenied)
+
+	auth.options.Authorizer = AuthorizerFunc(func(context.Context, Identity) error { return nil })
 	sessionRequest := httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/session", nil)
 	sessionRequest.AddCookie(identityCookie)
 	session := httptest.NewRecorder()
@@ -61,24 +69,16 @@ func TestOIDCLoginSessionMiddlewareAndLogout(t *testing.T) {
 	if err := json.NewDecoder(session.Body).Decode(&sessionResponse); err != nil {
 		t.Fatalf("decode session response: %v", err)
 	}
-	if session.Code != http.StatusOK || sessionResponse.Status != SessionStatusAuthenticated || sessionResponse.Identity == nil || sessionResponse.Identity.Username != "admin" {
+	if session.Code != http.StatusOK || sessionResponse.Status != SessionStatusAuthenticated || sessionResponse.Access != AccessStatusGranted || sessionResponse.Identity == nil || sessionResponse.Identity.Username != "admin" {
 		t.Fatalf("unexpected session: status=%d body=%q", session.Code, session.Body.String())
 	}
 
 	signedOut := httptest.NewRecorder()
 	auth.Handler().ServeHTTP(signedOut, httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/session", nil))
-	assertSessionStatus(t, signedOut, SessionStatusSignedOut)
-
-	auth.options.Authorizer = AuthorizerFunc(func(context.Context, Identity) error { return ErrForbidden })
-	forbiddenRequest := httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/session", nil)
-	forbiddenRequest.AddCookie(identityCookie)
-	forbidden := httptest.NewRecorder()
-	auth.Handler().ServeHTTP(forbidden, forbiddenRequest)
-	assertSessionStatus(t, forbidden, SessionStatusForbidden)
-	auth.options.Authorizer = AuthorizerFunc(func(context.Context, Identity) error { return nil })
+	assertSignedOutSession(t, signedOut)
 
 	var contextIdentity Identity
-	protected := auth.RequireUser(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	protected := auth.RequireAccess(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		contextIdentity, _ = IdentityFromContext(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -90,6 +90,17 @@ func TestOIDCLoginSessionMiddlewareAndLogout(t *testing.T) {
 	}
 
 	auth.options.Authorizer = AuthorizerFunc(func(context.Context, Identity) error { return ErrForbidden })
+	authenticatedOnly := auth.RequireAuthenticated(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	authenticatedOnlyRequest := httptest.NewRequest(http.MethodGet, "https://tool.example.com/api/profile", nil)
+	authenticatedOnlyRequest.AddCookie(identityCookie)
+	authenticatedOnlyResponse := httptest.NewRecorder()
+	authenticatedOnly.ServeHTTP(authenticatedOnlyResponse, authenticatedOnlyRequest)
+	if authenticatedOnlyResponse.Code != http.StatusNoContent {
+		t.Fatalf("unexpected authenticated-only API status: %d", authenticatedOnlyResponse.Code)
+	}
+
 	forbiddenAPIRequest := httptest.NewRequest(http.MethodGet, "https://tool.example.com/api/settings", nil)
 	forbiddenAPIRequest.AddCookie(identityCookie)
 	forbiddenAPIResponse := httptest.NewRecorder()
@@ -133,13 +144,24 @@ func TestOIDCLoginSessionMiddlewareAndLogout(t *testing.T) {
 	}
 }
 
-func assertSessionStatus(t *testing.T, recorder *httptest.ResponseRecorder, want SessionStatus) {
+func assertSignedOutSession(t *testing.T, recorder *httptest.ResponseRecorder) {
 	t.Helper()
 	var response SessionResponse
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatalf("decode session response: %v", err)
 	}
-	if recorder.Code != http.StatusOK || response.Status != want || response.Identity != nil {
+	if recorder.Code != http.StatusOK || response.Status != SessionStatusSignedOut || response.Access != "" || response.Identity != nil {
+		t.Fatalf("unexpected session response: code=%d response=%+v", recorder.Code, response)
+	}
+}
+
+func assertAuthenticatedSession(t *testing.T, recorder *httptest.ResponseRecorder, wantAccess AccessStatus) {
+	t.Helper()
+	var response SessionResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode session response: %v", err)
+	}
+	if recorder.Code != http.StatusOK || response.Status != SessionStatusAuthenticated || response.Access != wantAccess || response.Identity == nil || response.Identity.Username != "admin" {
 		t.Fatalf("unexpected session response: code=%d response=%+v", recorder.Code, response)
 	}
 }

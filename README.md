@@ -42,7 +42,7 @@ if err != nil {
 }
 
 mux.Handle("/oidcauth/", auth.Handler())
-mux.Handle("/api/", auth.RequireUser(api))
+mux.Handle("/api/", auth.RequireAccess(api))
 ```
 
 端点：
@@ -61,7 +61,7 @@ POST /oidcauth/logout
 
 不同注册域名使用独立的 Host-only Cookie，不共享浏览器会话；用户在每个域名首次访问时分别登录。
 
-`RequireUser` 验证成功后将身份写入 request context：
+`RequireAuthenticated` 只验证身份，`RequireAccess` 还执行配置的 `Authorizer`。两者验证成功后都将身份写入 request context：
 
 ```go
 identity, ok := oidcauth.IdentityFromContext(r.Context())
@@ -87,14 +87,14 @@ Dex GitHub 身份形状：
 ```
 
 ```json
-{"status":"forbidden"}
+{"status":"authenticated","access":"denied","identity":{"username":"octocat"}}
 ```
 
 ```json
-{"status":"authenticated","identity":{"username":"octocat"}}
+{"status":"authenticated","access":"granted","identity":{"username":"octocat"}}
 ```
 
-受 `RequireUser` 保护的业务端点仍使用 `401` 和 `403` 表达认证、授权失败。
+受 `RequireAccess` 保护的业务端点仍使用 `401` 和 `403` 表达认证、授权失败。OIDC callback 只完成认证；授权失败的身份同样写入 Host-only Cookie，然后由应用展示当前账号和拒绝访问状态。
 
 授权只按规范化 GitHub 用户名匹配 `AllowedUsers`；`provider_user_id` 继续用于身份展示和审计。
 
