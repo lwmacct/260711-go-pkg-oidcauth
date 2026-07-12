@@ -7,11 +7,12 @@ import (
 )
 
 type LoginFlow struct {
-	State     string
-	Nonce     string
-	Verifier  string
-	ReturnTo  string
-	ExpiresAt time.Time
+	State       string
+	Nonce       string
+	Verifier    string
+	ExternalURL string
+	ReturnTo    string
+	ExpiresAt   time.Time
 }
 
 type FlowStore interface {

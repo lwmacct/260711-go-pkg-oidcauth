@@ -19,15 +19,15 @@ import (
 const maxIdentityCookieBytes = 12 << 10
 
 type Auth struct {
-	config     Config
-	options    Options
-	oauth      oauth2.Config
-	verifier   *oidc.IDTokenVerifier
-	publicURL  *url.URL
-	secure     bool
-	cookieName string
-	flowCookie string
-	pathPrefix string
+	config       Config
+	options      Options
+	oauth        oauth2.Config
+	verifier     *oidc.IDTokenVerifier
+	externalURLs map[string]*url.URL
+	secure       bool
+	cookieName   string
+	flowCookie   string
+	pathPrefix   string
 }
 
 type baseClaims struct {
@@ -47,7 +47,6 @@ func New(ctx context.Context, config Config, options Options) (*Auth, error) {
 	if pathPrefix == "" || !strings.HasPrefix(pathPrefix, "/") || strings.Contains(pathPrefix, "?") || strings.Contains(pathPrefix, "#") {
 		return nil, fmt.Errorf("%w: path prefix", ErrInvalidConfig)
 	}
-	callbackURL, _ := url.Parse(config.callbackURL(pathPrefix))
 	providerCtx := oidc.ClientContext(ctx, options.HTTPClient)
 	provider, err := oidc.NewProvider(providerCtx, config.Issuer)
 	if err != nil {
@@ -59,8 +58,11 @@ func New(ctx context.Context, config Config, options Options) (*Auth, error) {
 	} else {
 		endpoint.AuthStyle = oauth2.AuthStyleInHeader
 	}
-	callback := callbackURL
-	publicURL, _ := url.Parse(config.ExternalURL)
+	externalURLs := make(map[string]*url.URL, len(config.ExternalURLs))
+	for _, value := range config.ExternalURLs {
+		externalURL, _ := url.Parse(value)
+		externalURLs[strings.ToLower(externalURL.Host)] = externalURL
+	}
 	cookieSuffix := shortHash(config.ClientID)
 	cookieName := options.CookieName
 	flowCookie := options.FlowCookieName
@@ -70,7 +72,7 @@ func New(ctx context.Context, config Config, options Options) (*Auth, error) {
 	if flowCookie == "" {
 		flowCookie = "oidcauth_flow_" + cookieSuffix
 	}
-	secure := callback.Scheme == "https"
+	secure := strings.HasPrefix(config.ExternalURLs[0], "https://")
 	if secure {
 		if options.CookieName == "" {
 			cookieName = "__Host-" + cookieName
@@ -87,15 +89,14 @@ func New(ctx context.Context, config Config, options Options) (*Auth, error) {
 			ClientID:     config.ClientID,
 			ClientSecret: config.ClientSecret,
 			Endpoint:     endpoint,
-			RedirectURL:  callbackURL.String(),
 			Scopes:       scopes,
 		},
-		verifier:   provider.Verifier(&oidc.Config{ClientID: config.ClientID}),
-		publicURL:  publicURL,
-		secure:     secure,
-		cookieName: cookieName,
-		flowCookie: flowCookie,
-		pathPrefix: pathPrefix,
+		verifier:     provider.Verifier(&oidc.Config{ClientID: config.ClientID}),
+		externalURLs: externalURLs,
+		secure:       secure,
+		cookieName:   cookieName,
+		flowCookie:   flowCookie,
+		pathPrefix:   pathPrefix,
 	}, nil
 }
 
@@ -119,7 +120,7 @@ func (a *Auth) RequireUser(next http.Handler) http.Handler {
 			writeJSONError(w, status, errorMessage(status))
 			return
 		}
-		if isUnsafeMethod(r.Method) && !a.sameOrigin(r.Header.Get("Origin")) {
+		if isUnsafeMethod(r.Method) && !a.sameOrigin(r) {
 			a.logRejectedOrigin(r)
 			writeJSONError(w, http.StatusForbidden, "invalid request origin")
 			return
@@ -144,6 +145,11 @@ func (a *Auth) Identity(r *http.Request) (Identity, error) {
 }
 
 func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
+	externalURL, ok := a.externalURL(r)
+	if !ok {
+		http.Error(w, "untrusted request host", http.StatusBadRequest)
+		return
+	}
 	returnTo, err := normalizeReturnTo(r.URL.Query().Get("return_to"))
 	if err != nil {
 		http.Error(w, "invalid return_to", http.StatusBadRequest)
@@ -164,14 +170,15 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "login unavailable", http.StatusInternalServerError)
 		return
 	}
-	flow := LoginFlow{State: state, Nonce: nonce, Verifier: verifier, ReturnTo: returnTo, ExpiresAt: a.options.Now().Add(a.options.FlowTTL)}
+	flow := LoginFlow{State: state, Nonce: nonce, Verifier: verifier, ExternalURL: externalURL.String(), ReturnTo: returnTo, ExpiresAt: a.options.Now().Add(a.options.FlowTTL)}
 	if err := a.options.FlowStore.Create(r.Context(), flow); err != nil {
 		http.Error(w, "login unavailable", http.StatusInternalServerError)
 		return
 	}
 	a.setFlowCookie(w, state, int(a.options.FlowTTL.Seconds()))
 	challenge := sha256.Sum256([]byte(verifier))
-	location := a.oauth.AuthCodeURL(state,
+	oauth := a.oauthFor(externalURL)
+	location := oauth.AuthCodeURL(state,
 		oidc.Nonce(nonce),
 		oauth2.SetAuthURLParam("code_challenge", base64.RawURLEncoding.EncodeToString(challenge[:])),
 		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
@@ -180,16 +187,22 @@ func (a *Auth) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Auth) callback(w http.ResponseWriter, r *http.Request) {
+	externalURL, ok := a.externalURL(r)
+	if !ok {
+		http.Error(w, "untrusted request host", http.StatusBadRequest)
+		return
+	}
 	state := r.URL.Query().Get("state")
 	flowCookie, cookieErr := r.Cookie(a.flowCookie)
 	a.setFlowCookie(w, "", -1)
 	flow, flowErr := a.options.FlowStore.Consume(r.Context(), state)
-	if cookieErr != nil || flowCookie.Value != state || flowErr != nil || r.URL.Query().Get("code") == "" {
+	if cookieErr != nil || flowCookie.Value != state || flowErr != nil || flow.ExternalURL != externalURL.String() || r.URL.Query().Get("code") == "" {
 		http.Error(w, "invalid or expired login", http.StatusBadRequest)
 		return
 	}
 	ctx := oidc.ClientContext(r.Context(), a.options.HTTPClient)
-	token, err := a.oauth.Exchange(ctx, r.URL.Query().Get("code"), oauth2.SetAuthURLParam("code_verifier", flow.Verifier))
+	oauth := a.oauthFor(externalURL)
+	token, err := oauth.Exchange(ctx, r.URL.Query().Get("code"), oauth2.SetAuthURLParam("code_verifier", flow.Verifier))
 	if err != nil {
 		a.logOAuthError(err)
 		http.Error(w, "login failed", http.StatusBadGateway)
@@ -247,7 +260,7 @@ func (a *Auth) session(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Auth) logout(w http.ResponseWriter, r *http.Request) {
-	if !a.sameOrigin(r.Header.Get("Origin")) {
+	if !a.sameOrigin(r) {
 		a.logRejectedOrigin(r)
 		writeJSONError(w, http.StatusForbidden, "invalid request origin")
 		return
@@ -292,10 +305,22 @@ func (a *Auth) setFlowCookie(w http.ResponseWriter, value string, maxAge int) {
 	http.SetCookie(w, &http.Cookie{Name: a.flowCookie, Value: value, Path: "/", MaxAge: maxAge, HttpOnly: true, Secure: a.secure, SameSite: http.SameSiteLaxMode})
 }
 
-func (a *Auth) sameOrigin(origin string) bool {
-	parsed, err := url.Parse(origin)
-	return err == nil && parsed.User == nil && parsed.Opaque == "" && parsed.RawQuery == "" && parsed.Fragment == "" &&
-		parsed.Scheme == a.publicURL.Scheme && parsed.Host == a.publicURL.Host && parsed.Path == ""
+func (a *Auth) externalURL(r *http.Request) (*url.URL, bool) {
+	externalURL, ok := a.externalURLs[strings.ToLower(r.Host)]
+	return externalURL, ok
+}
+
+func (a *Auth) oauthFor(externalURL *url.URL) oauth2.Config {
+	oauth := a.oauth
+	oauth.RedirectURL = externalURL.String() + a.pathPrefix + "/callback"
+	return oauth
+}
+
+func (a *Auth) sameOrigin(r *http.Request) bool {
+	expected, ok := a.externalURL(r)
+	parsed, err := url.Parse(r.Header.Get("Origin"))
+	return ok && err == nil && parsed.User == nil && parsed.Opaque == "" && parsed.RawQuery == "" && parsed.Fragment == "" &&
+		parsed.Scheme == expected.Scheme && strings.EqualFold(parsed.Host, expected.Host) && parsed.Path == ""
 }
 
 func (a *Auth) logRejectedOrigin(r *http.Request) {
@@ -303,7 +328,8 @@ func (a *Auth) logRejectedOrigin(r *http.Request) {
 		"method", r.Method,
 		"path", r.URL.Path,
 		"origin", r.Header.Get("Origin"),
-		"expected_origin", a.config.ExternalURL,
+		"request_host", r.Host,
+		"expected_origins", a.config.ExternalURLs,
 	)
 }
 

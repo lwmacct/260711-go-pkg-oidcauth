@@ -38,6 +38,7 @@ func TestOIDCLoginSessionMiddlewareAndLogout(t *testing.T) {
 	}
 	provider.nonce = query.Get("nonce")
 	provider.expectedVerifier = authFlowVerifier(t, auth, query.Get("state"))
+	provider.expectedRedirectURI = "https://tool.example.com/oidcauth/callback"
 	flowCookie := login.Result().Cookies()[0]
 
 	callbackRequest := httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/callback?code=code&state="+url.QueryEscape(query.Get("state")), nil)
@@ -158,6 +159,17 @@ func TestLoginRejectsUnsafeReturnTo(t *testing.T) {
 	}
 }
 
+func TestLoginRejectsUntrustedRequestHost(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	provider := newTestProvider(t, now)
+	auth := newTestAuth(t, provider, now)
+	recorder := httptest.NewRecorder()
+	auth.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "https://unknown.example.com/oidcauth/login", nil))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected status: %d", recorder.Code)
+	}
+}
+
 func TestLoginDefaultsReturnToRoot(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	provider := newTestProvider(t, now)
@@ -175,15 +187,58 @@ func TestLoginDefaultsReturnToRoot(t *testing.T) {
 	if flow.ReturnTo != "/" {
 		t.Fatalf("unexpected return_to: %q", flow.ReturnTo)
 	}
+	if flow.ExternalURL != "https://tool.example.com" {
+		t.Fatalf("unexpected external URL: %q", flow.ExternalURL)
+	}
+
+	other := httptest.NewRecorder()
+	auth.Handler().ServeHTTP(other, httptest.NewRequest(http.MethodGet, "https://other.example.com/oidcauth/login", nil))
+	otherLocation, err := url.Parse(other.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := otherLocation.Query().Get("redirect_uri"); got != "https://other.example.com/oidcauth/callback" {
+		t.Fatalf("unexpected redirect URI: %q", got)
+	}
+	store.mu.Lock()
+	otherFlow := store.flows[otherLocation.Query().Get("state")]
+	store.mu.Unlock()
+	if otherFlow.ExternalURL != "https://other.example.com" {
+		t.Fatalf("unexpected other external URL: %q", otherFlow.ExternalURL)
+	}
+}
+
+func TestCallbackMustUseLoginOrigin(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	provider := newTestProvider(t, now)
+	auth := newTestAuth(t, provider, now)
+
+	login := httptest.NewRecorder()
+	auth.Handler().ServeHTTP(login, httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/login", nil))
+	location, err := url.Parse(login.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback := httptest.NewRequest(http.MethodGet, "https://other.example.com/oidcauth/callback?code=code&state="+url.QueryEscape(location.Query().Get("state")), nil)
+	callback.AddCookie(login.Result().Cookies()[0])
+	response := httptest.NewRecorder()
+	auth.Handler().ServeHTTP(response, callback)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected cross-origin callback status: %d", response.Code)
+	}
 }
 
 func TestSameOriginRequiresExactConfiguredOrigin(t *testing.T) {
-	auth := &Auth{publicURL: &url.URL{Scheme: "https", Host: "tool.example.com:8443"}}
+	externalURL := &url.URL{Scheme: "https", Host: "tool.example.com:8443"}
+	auth := &Auth{externalURLs: map[string]*url.URL{"tool.example.com:8443": externalURL, "other.example.com:8443": {Scheme: "https", Host: "other.example.com:8443"}}}
 	for _, test := range []struct {
+		host   string
 		origin string
 		want   bool
 	}{
-		{origin: "https://tool.example.com:8443", want: true},
+		{host: "tool.example.com:8443", origin: "https://tool.example.com:8443", want: true},
+		{host: "tool.example.com:8443", origin: "https://other.example.com:8443"},
+		{host: "unknown.example.com:8443", origin: "https://tool.example.com:8443"},
 		{origin: ""},
 		{origin: "https://tool.example.com"},
 		{origin: "http://tool.example.com:8443"},
@@ -192,19 +247,26 @@ func TestSameOriginRequiresExactConfiguredOrigin(t *testing.T) {
 		{origin: "https://tool.example.com:8443/"},
 		{origin: "https://tool.example.com:8443?query"},
 	} {
-		if got := auth.sameOrigin(test.origin); got != test.want {
-			t.Errorf("sameOrigin(%q) = %v, want %v", test.origin, got, test.want)
+		host := test.host
+		if host == "" {
+			host = "tool.example.com:8443"
+		}
+		request := httptest.NewRequest(http.MethodPost, "https://"+host+"/api/settings", nil)
+		request.Header.Set("Origin", test.origin)
+		if got := auth.sameOrigin(request); got != test.want {
+			t.Errorf("sameOrigin(host=%q, origin=%q) = %v, want %v", test.host, test.origin, got, test.want)
 		}
 	}
 }
 
 type testProvider struct {
-	server           *httptest.Server
-	privateKey       *rsa.PrivateKey
-	oidcServer       *oidctest.Server
-	now              time.Time
-	nonce            string
-	expectedVerifier string
+	server              *httptest.Server
+	privateKey          *rsa.PrivateKey
+	oidcServer          *oidctest.Server
+	now                 time.Time
+	nonce               string
+	expectedVerifier    string
+	expectedRedirectURI string
 }
 
 func newTestProvider(t *testing.T, now time.Time) *testProvider {
@@ -230,7 +292,7 @@ func (p *testProvider) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "form", http.StatusBadRequest)
 		return
 	}
-	if r.Form.Get("client_id") != "tool" || r.Form.Get("client_secret") != "" || r.Form.Get("code_verifier") != p.expectedVerifier {
+	if r.Form.Get("client_id") != "tool" || r.Form.Get("client_secret") != "" || r.Form.Get("code_verifier") != p.expectedVerifier || r.Form.Get("redirect_uri") != p.expectedRedirectURI {
 		http.Error(w, "invalid token request", http.StatusUnauthorized)
 		return
 	}
@@ -246,10 +308,10 @@ func (p *testProvider) serveHTTP(w http.ResponseWriter, r *http.Request) {
 func newTestAuth(t *testing.T, provider *testProvider, now time.Time) *Auth {
 	t.Helper()
 	auth, err := New(t.Context(), Config{
-		Issuer:      provider.server.URL,
-		ClientID:    "tool",
-		ExternalURL: "https://tool.example.com",
-		SessionTTL:  30 * time.Minute,
+		Issuer:       provider.server.URL,
+		ClientID:     "tool",
+		ExternalURLs: []string{"https://tool.example.com", "https://other.example.com"},
+		SessionTTL:   30 * time.Minute,
 	}, Options{
 		HTTPClient: provider.server.Client(),
 		Now:        func() time.Time { return now },

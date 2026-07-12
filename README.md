@@ -18,10 +18,13 @@ staticClients:
     public: true
     redirectURIs:
       - http://localhost:8080/oidcauth/callback
-    allowedConnectors:
-      - github
-    ssoSharedWith:
-      - "*"
+
+  - id: tool-production
+    name: Tool Production
+    public: true
+    redirectURIs:
+      - https://tool.example.com/oidcauth/callback
+      - https://tool-alt.example.com/oidcauth/callback
 ```
 
 应用接入：
@@ -30,7 +33,7 @@ staticClients:
 auth, err := dexgithub.New(ctx, dexgithub.Config{
 	Issuer:       "https://auth.example.com",
 	ClientID:     "tool-local",
-	ExternalURL:  "http://localhost:5173",
+	ExternalURLs: []string{"http://localhost:5173"},
 	AllowedUsers: []string{"octocat"},
 	SessionTTL:   24 * time.Hour,
 }, dexgithub.Options{})
@@ -51,9 +54,12 @@ GET  /oidcauth/session
 POST /oidcauth/logout
 ```
 
-`ExternalURL` 是部署时可信的浏览器 origin。callback 固定派生为
-`<external-url>/oidcauth/callback`，Dex client 必须注册该地址。登录入口可以携带经过严格校验的
-同源路径，例如 `/oidcauth/login?return_to=%2F%23%2Fsettings`；登录成功后恢复该位置，缺省回到 `/`。
+`ExternalURLs` 是部署时可信的浏览器 origin 列表。每个 callback 固定派生为
+`<external-url>/oidcauth/callback`，Dex client 必须注册全部地址。登录时根据请求 Host 从该白名单选择
+`redirect_uri`，回调必须返回发起登录的同一 origin。登录入口可以携带经过严格校验的同源路径，例如
+`/oidcauth/login?return_to=%2F%23%2Fsettings`；登录成功后恢复该位置，缺省回到 `/`。
+
+不同注册域名使用独立的 Host-only Cookie，不共享浏览器会话；用户在每个域名首次访问时分别登录。
 
 `RequireUser` 验证成功后将身份写入 request context：
 
@@ -99,7 +105,7 @@ Dex GitHub 身份形状：
 - Authorization Code Flow 始终使用 S256 PKCE；
 - public client 不发送 secret；配置 `ClientSecret` 时使用 confidential client；
 - 身份 Cookie 使用 `HttpOnly`、`SameSite=Strict`，HTTPS 时使用 `Secure` 与 `__Host-` 前缀；
-- 修改类请求要求 `Origin` 与 `ExternalURL` 精确同源；
+- 修改类请求要求 `Origin` 与当前请求 Host 对应的可信 `ExternalURLs` 项精确同源；
 - `return_to` 只接受同源绝对路径，并绑定到一次性登录 flow；
 - 不保存 access token 或 refresh token；
 - 每次请求重新执行授权器，修改白名单后现有 Cookie 立即受新策略约束。

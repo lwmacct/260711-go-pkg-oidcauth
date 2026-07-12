@@ -11,7 +11,7 @@ func Example() {
 	config, err := (dexgithub.Config{
 		Issuer:       "https://auth.example.com",
 		ClientID:     "tool-local",
-		ExternalURL:  "http://localhost:5173",
+		ExternalURLs: []string{"http://localhost:5173"},
 		AllowedUsers: []string{"octocat"},
 		SessionTTL:   24 * time.Hour,
 	}).Validate()

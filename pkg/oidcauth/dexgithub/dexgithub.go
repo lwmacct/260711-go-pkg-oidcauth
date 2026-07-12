@@ -13,12 +13,12 @@ import (
 )
 
 type Config struct {
-	Issuer       string        `json:"issuer"        desc:"Dex issuer URL"`
-	ClientID     string        `json:"client-id"      desc:"Dex OIDC client ID"`
-	ClientSecret string        `json:"client-secret"  desc:"Dex confidential client secret；public client 留空"`
-	ExternalURL  string        `json:"external-url"   desc:"浏览器访问应用的外部 origin"`
-	AllowedUsers []string      `json:"allowed-users"  desc:"允许访问应用的 GitHub 用户名"`
-	SessionTTL   time.Duration `json:"session-ttl"     desc:"身份 Cookie 最长有效时间"`
+	Issuer       string        `json:"issuer"         desc:"Dex issuer URL"`
+	ClientID     string        `json:"client-id"       desc:"Dex OIDC client ID"`
+	ClientSecret string        `json:"client-secret"   desc:"Dex confidential client secret；public client 留空"`
+	ExternalURLs []string      `json:"external-urls"   desc:"允许浏览器访问应用的可信 origin"`
+	AllowedUsers []string      `json:"allowed-users"   desc:"允许访问应用的 GitHub 用户名"`
+	SessionTTL   time.Duration `json:"session-ttl"      desc:"身份 Cookie 最长有效时间"`
 }
 
 type Options struct {
@@ -37,7 +37,7 @@ func (c Config) Validate() (Config, error) {
 	c.Issuer = core.Issuer
 	c.ClientID = core.ClientID
 	c.ClientSecret = core.ClientSecret
-	c.ExternalURL = core.ExternalURL
+	c.ExternalURLs = core.ExternalURLs
 	c.SessionTTL = core.SessionTTL
 	for i := range c.AllowedUsers {
 		c.AllowedUsers[i] = strings.ToLower(strings.TrimSpace(c.AllowedUsers[i]))
@@ -64,7 +64,7 @@ func (c Config) core() oidcauth.Config {
 		Issuer:       c.Issuer,
 		ClientID:     c.ClientID,
 		ClientSecret: c.ClientSecret,
-		ExternalURL:  c.ExternalURL,
+		ExternalURLs: c.ExternalURLs,
 		SessionTTL:   c.SessionTTL,
 	}
 }
