@@ -120,6 +120,7 @@ func (a *Auth) RequireUser(next http.Handler) http.Handler {
 			return
 		}
 		if isUnsafeMethod(r.Method) && !a.sameOrigin(r.Header.Get("Origin")) {
+			a.logRejectedOrigin(r)
 			writeJSONError(w, http.StatusForbidden, "invalid request origin")
 			return
 		}
@@ -234,20 +235,20 @@ func normalizeReturnTo(value string) (string, error) {
 
 func (a *Auth) session(w http.ResponseWriter, r *http.Request) {
 	identity, err := a.Identity(r)
+	response := SessionResponse{Status: SessionStatusAuthenticated, Identity: &identity}
 	if err != nil {
-		status := http.StatusUnauthorized
+		response = SessionResponse{Status: SessionStatusSignedOut}
 		if errors.Is(err, ErrForbidden) {
-			status = http.StatusForbidden
+			response.Status = SessionStatusForbidden
 		}
-		writeJSONError(w, status, errorMessage(status))
-		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(identity)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (a *Auth) logout(w http.ResponseWriter, r *http.Request) {
 	if !a.sameOrigin(r.Header.Get("Origin")) {
+		a.logRejectedOrigin(r)
 		writeJSONError(w, http.StatusForbidden, "invalid request origin")
 		return
 	}
@@ -293,7 +294,17 @@ func (a *Auth) setFlowCookie(w http.ResponseWriter, value string, maxAge int) {
 
 func (a *Auth) sameOrigin(origin string) bool {
 	parsed, err := url.Parse(origin)
-	return err == nil && parsed.Scheme == a.publicURL.Scheme && parsed.Host == a.publicURL.Host && parsed.Path == ""
+	return err == nil && parsed.User == nil && parsed.Opaque == "" && parsed.RawQuery == "" && parsed.Fragment == "" &&
+		parsed.Scheme == a.publicURL.Scheme && parsed.Host == a.publicURL.Host && parsed.Path == ""
+}
+
+func (a *Auth) logRejectedOrigin(r *http.Request) {
+	a.options.Logger.Warn("OIDC request origin rejected",
+		"method", r.Method,
+		"path", r.URL.Path,
+		"origin", r.Header.Get("Origin"),
+		"expected_origin", a.config.ExternalURL,
+	)
 }
 
 func (a *Auth) logOAuthError(err error) {

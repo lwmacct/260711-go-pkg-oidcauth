@@ -74,6 +74,22 @@ Dex GitHub 身份形状：
 }
 ```
 
+`GET /oidcauth/session` 是状态查询端点，三种正常会话状态都返回 `200`：
+
+```json
+{"status":"signed-out"}
+```
+
+```json
+{"status":"forbidden"}
+```
+
+```json
+{"status":"authenticated","identity":{"username":"octocat"}}
+```
+
+受 `RequireUser` 保护的业务端点仍使用 `401` 和 `403` 表达认证、授权失败。
+
 授权只按规范化 GitHub 用户名匹配 `AllowedUsers`；`provider_user_id` 继续用于身份展示和审计。
 
 ## 安全边界

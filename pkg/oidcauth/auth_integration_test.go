@@ -56,15 +56,48 @@ func TestOIDCLoginSessionMiddlewareAndLogout(t *testing.T) {
 	sessionRequest.AddCookie(identityCookie)
 	session := httptest.NewRecorder()
 	auth.Handler().ServeHTTP(session, sessionRequest)
-	if session.Code != http.StatusOK || !strings.Contains(session.Body.String(), `"username":"admin"`) {
+	var sessionResponse SessionResponse
+	if err := json.NewDecoder(session.Body).Decode(&sessionResponse); err != nil {
+		t.Fatalf("decode session response: %v", err)
+	}
+	if session.Code != http.StatusOK || sessionResponse.Status != SessionStatusAuthenticated || sessionResponse.Identity == nil || sessionResponse.Identity.Username != "admin" {
 		t.Fatalf("unexpected session: status=%d body=%q", session.Code, session.Body.String())
 	}
+
+	signedOut := httptest.NewRecorder()
+	auth.Handler().ServeHTTP(signedOut, httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/session", nil))
+	assertSessionStatus(t, signedOut, SessionStatusSignedOut)
+
+	auth.options.Authorizer = AuthorizerFunc(func(context.Context, Identity) error { return ErrForbidden })
+	forbiddenRequest := httptest.NewRequest(http.MethodGet, "https://tool.example.com/oidcauth/session", nil)
+	forbiddenRequest.AddCookie(identityCookie)
+	forbidden := httptest.NewRecorder()
+	auth.Handler().ServeHTTP(forbidden, forbiddenRequest)
+	assertSessionStatus(t, forbidden, SessionStatusForbidden)
+	auth.options.Authorizer = AuthorizerFunc(func(context.Context, Identity) error { return nil })
 
 	var contextIdentity Identity
 	protected := auth.RequireUser(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		contextIdentity, _ = IdentityFromContext(r.Context())
 		w.WriteHeader(http.StatusNoContent)
 	}))
+
+	unauthenticatedResponse := httptest.NewRecorder()
+	protected.ServeHTTP(unauthenticatedResponse, httptest.NewRequest(http.MethodGet, "https://tool.example.com/api/settings", nil))
+	if unauthenticatedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("unexpected unauthenticated API status: %d", unauthenticatedResponse.Code)
+	}
+
+	auth.options.Authorizer = AuthorizerFunc(func(context.Context, Identity) error { return ErrForbidden })
+	forbiddenAPIRequest := httptest.NewRequest(http.MethodGet, "https://tool.example.com/api/settings", nil)
+	forbiddenAPIRequest.AddCookie(identityCookie)
+	forbiddenAPIResponse := httptest.NewRecorder()
+	protected.ServeHTTP(forbiddenAPIResponse, forbiddenAPIRequest)
+	if forbiddenAPIResponse.Code != http.StatusForbidden {
+		t.Fatalf("unexpected forbidden API status: %d", forbiddenAPIResponse.Code)
+	}
+	auth.options.Authorizer = AuthorizerFunc(func(context.Context, Identity) error { return nil })
+
 	protectedRequest := httptest.NewRequest(http.MethodPost, "https://tool.example.com/api/settings", nil)
 	protectedRequest.Header.Set("Origin", "https://tool.example.com")
 	protectedRequest.AddCookie(identityCookie)
@@ -99,6 +132,17 @@ func TestOIDCLoginSessionMiddlewareAndLogout(t *testing.T) {
 	}
 }
 
+func assertSessionStatus(t *testing.T, recorder *httptest.ResponseRecorder, want SessionStatus) {
+	t.Helper()
+	var response SessionResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode session response: %v", err)
+	}
+	if recorder.Code != http.StatusOK || response.Status != want || response.Identity != nil {
+		t.Fatalf("unexpected session response: code=%d response=%+v", recorder.Code, response)
+	}
+}
+
 func TestLoginRejectsUnsafeReturnTo(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	provider := newTestProvider(t, now)
@@ -130,6 +174,27 @@ func TestLoginDefaultsReturnToRoot(t *testing.T) {
 	store.mu.Unlock()
 	if flow.ReturnTo != "/" {
 		t.Fatalf("unexpected return_to: %q", flow.ReturnTo)
+	}
+}
+
+func TestSameOriginRequiresExactConfiguredOrigin(t *testing.T) {
+	auth := &Auth{publicURL: &url.URL{Scheme: "https", Host: "tool.example.com:8443"}}
+	for _, test := range []struct {
+		origin string
+		want   bool
+	}{
+		{origin: "https://tool.example.com:8443", want: true},
+		{origin: ""},
+		{origin: "https://tool.example.com"},
+		{origin: "http://tool.example.com:8443"},
+		{origin: "https://evil.example.com:8443"},
+		{origin: "https://user@tool.example.com:8443"},
+		{origin: "https://tool.example.com:8443/"},
+		{origin: "https://tool.example.com:8443?query"},
+	} {
+		if got := auth.sameOrigin(test.origin); got != test.want {
+			t.Errorf("sameOrigin(%q) = %v, want %v", test.origin, got, test.want)
+		}
 	}
 }
 
