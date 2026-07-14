@@ -1,4 +1,18 @@
-# oidcauth
+# oidcauth（已停止维护）
+
+本仓库已由 [`go-pkg-httpauth`](https://github.com/lwmacct/260711-go-pkg-httpauth) 的
+`pkg/httpauth/oidc` 与 `pkg/httpauth/oidc/dexgithub` 取代。旧 API 不再维护，也不提供兼容层。
+
+```go
+import (
+	"github.com/lwmacct/260711-go-pkg-httpauth/pkg/httpauth"
+	"github.com/lwmacct/260711-go-pkg-httpauth/pkg/httpauth/oidc"
+	"github.com/lwmacct/260711-go-pkg-httpauth/pkg/httpauth/oidc/dexgithub"
+)
+```
+
+统一模块使用 `/auth/login/{method}`、`/auth/callback/{method}` 和 `/auth/session`，
+并签发不包含原始 OIDC ID Token 的统一加密 Session。
 
 `oidcauth` 为 Go Web 工具提供 OIDC Authorization Code 登录、S256 PKCE、HttpOnly 身份 Cookie 和 API 鉴权 middleware。
 
